@@ -86,7 +86,7 @@ void fetchPiholeData() {
   HTTPClient http;
   
   // URL für Pi-hole v5 (Standard)
-  String url = "http://" + String(host) + "/admin/api.php?summary&auth=" + String(apiToken);
+  String url = "http://" + String(host) + "/api.php?summary&auth=" + String(apiToken);
   
   // HINWEIS FÜR PI-HOLE v6: 
   // Falls du bereits Pi-hole v6 nutzt, gibt es die api.php nicht mehr. 
@@ -158,3 +158,4 @@ void sendNextionCommand(const String& cmd) {
   Serial.write(0xff);
   Serial.write(0xff);
 }
+
