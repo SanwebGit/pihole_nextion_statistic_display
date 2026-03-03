@@ -1,158 +1,160 @@
 /**
- *  ESP8266 NodeMCU 3 & Nextion NX8048T070 Display 7 inch 
- *  Requirements: - Raspberry Pi Zero/A+/2 B/3 B/3 B+/4 B with a running Pihole >= 5 and NTP Service installation
- *                - Nextion NX8048T070 display with a mico sd card for updating the display firmware
- *                - ESP8266 NodeMCU V3 or ESP8266 Wemos D1 mini with 4 wires (can be soldered direct with the Nextion NX8048T070 display connector)
- *                
- *                                    G     ->    GND
- *                  NodeMCU           TX    ->    RX      Nextion Display
- *                  Connector         RX    ->    TX      Connector
- *                                    VU    ->    5V
- *   
- *                  You can add an 470 μf / 35V capacitor (you have enought space behind the display, when you use my STL Files) between the 
- *                  GND and 5V Nextion display connector for additionally security.
- *                                    
- *                - Micro-USB 5V DC power adapter
- *                
- *                - Q: Why owen NTP Service, when your ISP or Router have this service?
- *                  A: Your Router and/or your ISP will block you after few minutes, when you ask to often the time to synchronize your network time,
- *                     so we use our owen lokal timeserver and we can see on the display by the time, when was the last refresh successfully.
- *                     In most cases we didn't need realtime statistics, so the default refresh time of 10 seconds is enought.
+ * ESP8266 NodeMCU & Nextion NX8048T070 Display 7 inch 
+ * Optimized for modern Pi-hole versions & ArduinoJson v7
  */
 
 #include <Arduino.h>
 #include <NTPClient.h>
-#include <ArduinoJson.h>
+#include <ArduinoJson.h>     // MUSS zwingend v6 oder v7 sein!
 #include <ArduinoOTA.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266WiFiMulti.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiUdp.h>
-#define USE_SERIAL Serial
 
 #define ESPHostname "pihole-display" // Wi-Fi & OTA Hostname
 
 WiFiClient client; // create wifi client object
 
-const char * host = "192.168.XXX.XXX"; // Pi-Hole IP - NOTICE: Make sure, the Pi-Hole and NTP service installation is on the same maschine
-const char * ssid = "YOUR-WIFI-SSID"; // Wi-Fi SSID Name
+const char * host = "192.168.XXX.XXX";    // Pi-Hole IP
+const char * apiToken = "DEIN_PIHOLE_API_TOKEN"; // WICHTIG: API Token aus dem Pi-hole Webinterface (Settings -> API/Web interface -> Show API token)
+const char * ssid = "YOUR-WIFI-SSID";     // Wi-Fi SSID Name
 const char * password = "YOUR-WIFI-PASS"; // Wi-Fi Password
-const char * otapassword = "YOUR-OTA-PASS"; // OTA Password for future updates over OTA
+const char * otapassword = "YOUR-OTA-PASS"; // OTA Password
 
-
-// You need to adjust the UTC offset for your timezone in milliseconds
-//    For UTC -5.00 : -5 * 60 * 60 = -18000
-//    For UTC +1.00 : 1 * 60 * 60 = 3600
-//    For UTC +0.00 : 0 * 60 * 60 = 0
+// UTC Offset in Sekunden anpassen
+// Winterzeit (MEZ) = 3600 | Sommerzeit (MESZ) = 7200
 const long utcOffsetInSeconds = 3600;
 
 // Define NTP Client to get time
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, host, utcOffsetInSeconds);
 
+// Timer-Variablen (ersetzen das blockierende delay)
+unsigned long previousMillis = 0;
+const long interval = 10000; // 10 Sekunden Refresh-Rate
+
+// Funktionsdeklarationen
+void sendNextionCommand(const String& cmd);
+void fetchPiholeData();
+
 void setup() {
-  // Deault Baudrate by the Nextion displays is 9600, but temporary the default baud rate 
-  // will change temporary to 115200 by using the given nextion tft file
   Serial.begin(115200);
   delay(1000);
-  Start_WiFi(ssid, password);
+
+  // WiFi Start
+  WiFi.hostname(ESPHostname);
+  WiFi.begin(ssid, password);
+  
+  int connAttempts = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    connAttempts++;
+    if (connAttempts > 40) {
+      ESP.restart(); // Neustart, falls WLAN nach 20 Sekunden nicht verbindet
+    }
+  }
+
+  // OTA Setup
   ArduinoOTA.setPort(8266);
   ArduinoOTA.setHostname(ESPHostname);
   ArduinoOTA.setPassword(otapassword);
   ArduinoOTA.begin();
+  
+  // NTP Setup
   timeClient.begin();
 }
 
 void loop() {
+  // OTA Handle muss zwingend extrem oft aufgerufen werden
   ArduinoOTA.handle();
-  if ((WiFi.status() == WL_CONNECTED)) {
-    timeClient.update();
-    HTTPClient http;
-    http.begin("http://" + String(host) + "/admin/api.php?summary");
-    int httpCode = http.GET();
-    if (httpCode > 0) {
-      if (httpCode == HTTP_CODE_OK) {
-        String payload = http.getString(); // save as string 'payload'
-        const size_t bufferSize = JSON_OBJECT_SIZE(10) + 250;
-        DynamicJsonBuffer jsonBuffer(bufferSize);
-        JsonObject & root = jsonBuffer.parseObject(payload);
-        JsonObject & response = root["response"];
-        JsonObject & response_data0 = response["data"][0];
-        const char * domains_being_blocked = root["domains_being_blocked"];
-        const char * dns_queries_today = root["dns_queries_today"];
-        const char * ads_blocked_today = root["ads_blocked_today"];
-        const char * ads_percentage_today = root["ads_percentage_today"];
-        const char * unique_domains = root["unique_domains"];
-        const char * queries_forwarded = root["queries_forwarded"];
-        const char * queries_cached = root["queries_cached"];
-        const char * clients_ever_seen = root["clients_ever_seen"];
-        const char * unique_clients = root["unique_clients"];
-        const char * status_pihole = root["status"];
-        const char * update_blocklist_days = root["gravity_last_updated"]["relative"]["days"];
-        const char * update_blocklist_hours = root["gravity_last_updated"]["relative"]["hours"];
-        const char * update_blocklist_minutes = root["gravity_last_updated"]["relative"]["minutes"];
 
-        String command1 = "start_page.ads.txt=\"" + String(dns_queries_today) + "\"";
-        Serial.print(command1);
-        endNextionCommand();
-        String command2 = "start_page.clients.txt=\"(Clients: unique: " + String(unique_clients) + " / ever seen: " + String(clients_ever_seen) + ")\"";
-        Serial.print(command2);
-        endNextionCommand();
-        String command3 = "start_page.domains.txt=\"" + String(domains_being_blocked) + "\"";
-        Serial.print(command3);
-        endNextionCommand();
-        String command4 = "start_page.today.txt=\"" + String(ads_percentage_today) + "%\"";
-        Serial.print(command4);
-        endNextionCommand();
-        String command5 = "start_page.blocked.txt=\"" + String(ads_blocked_today) + "\"";
-        Serial.print(command5);
-        endNextionCommand();
-        String command6 = "start_page.update.txt=\"(Last update: " + String(update_blocklist_days) + " days / " + String(update_blocklist_hours) + " hours / " + String(update_blocklist_minutes) + " minutes)\"";
-        Serial.print(command6);
-        endNextionCommand();
-          
-        if (String(status_pihole) == "enabled") {
-          String command7 = "start_page.status.pic=2";
-          Serial.print(command7);
-          endNextionCommand();
-          String command8 = "start_page.status.txt=\"" + String(timeClient.getFormattedTime()) + "\"";
-          Serial.print(command8);
-          endNextionCommand();
-        } else {
-          String command9 = "start_page.status.pic=1";
-          Serial.print(command9);
-          endNextionCommand();
-          String command10 = "start_page.status.txt=\"" + String(timeClient.getFormattedTime()) + "\"";
-          Serial.print(command10);
-          endNextionCommand();
-        }
-        http.end();
-      }
+  // Blockierungsfreier Timer für die Pi-hole Abfrage
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    if (WiFi.status() == WL_CONNECTED) {
+      timeClient.update();
+      fetchPiholeData();
     } else {
-      String command11 = "start_page.status.txt=\"No WiFi\"";
-      Serial.print(command11);
-      endNextionCommand();
+      sendNextionCommand("start_page.status.txt=\"No WiFi\"");
     }
   }
-  delay(10000); // 10 sec. refresh delay
 }
 
-void endNextionCommand() {
-  Serial.write(0xff);
-  Serial.write(0xff);
-  Serial.write(0xff);
-  delay(10);
-}
+void fetchPiholeData() {
+  HTTPClient http;
+  
+  // URL für Pi-hole v5 (Standard)
+  String url = "http://" + String(host) + "/admin/api.php?summary&auth=" + String(apiToken);
+  
+  // HINWEIS FÜR PI-HOLE v6: 
+  // Falls du bereits Pi-hole v6 nutzt, gibt es die api.php nicht mehr. 
+  // Entkommentiere dann die folgende Zeile (und passe ggf. Authentifizierungs-Header an, falls dein Webinterface passwortgeschützt ist):
+  // String url = "http://" + String(host) + "/api/stats/summary";
 
-int Start_WiFi(const char * ssid,
-  const char * password) {
-  int connAttempts = 0;
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    WiFi.hostname(ESPHostname);
-    delay(500);
-    if (connAttempts > 20) return -5;
-    connAttempts++;
+  http.begin(client, url);
+  int httpCode = http.GET();
+
+  if (httpCode > 0) {
+    if (httpCode == HTTP_CODE_OK) {
+      // Nutzt das moderne ArduinoJson v7
+      JsonDocument doc; 
+      
+      // Stream direkt auslesen (verhindert RAM-Überlauf bei großen JSON-Strings)
+      DeserializationError error = deserializeJson(doc, http.getStream());
+
+      if (!error) {
+        // Werte sicher auslesen. Wenn ein Key fehlt, wird der Standardwert (z.B. "0") gesetzt.
+        String domains_being_blocked = doc["domains_being_blocked"] | "0";
+        String dns_queries_today = doc["dns_queries_today"] | "0";
+        String ads_blocked_today = doc["ads_blocked_today"] | "0";
+        String ads_percentage_today = doc["ads_percentage_today"] | "0.0";
+        String clients_ever_seen = doc["clients_ever_seen"] | "0";
+        String unique_clients = doc["unique_clients"] | "0";
+        String status_pihole = doc["status"] | "unknown";
+
+        String update_days = doc["gravity_last_updated"]["relative"]["days"] | "0";
+        String update_hours = doc["gravity_last_updated"]["relative"]["hours"] | "0";
+        String update_minutes = doc["gravity_last_updated"]["relative"]["minutes"] | "0";
+
+        // Befehle generieren und ans Display senden
+        sendNextionCommand("start_page.ads.txt=\"" + dns_queries_today + "\"");
+        sendNextionCommand("start_page.clients.txt=\"(Clients: unique: " + unique_clients + " / ever seen: " + clients_ever_seen + ")\"");
+        sendNextionCommand("start_page.domains.txt=\"" + domains_being_blocked + "\"");
+        sendNextionCommand("start_page.today.txt=\"" + ads_percentage_today + "%\"");
+        sendNextionCommand("start_page.blocked.txt=\"" + ads_blocked_today + "\"");
+        sendNextionCommand("start_page.update.txt=\"(Last update: " + update_days + " days / " + update_hours + " hours / " + update_minutes + " minutes)\"");
+        
+        if (status_pihole == "enabled") {
+          sendNextionCommand("start_page.status.pic=2");
+        } else {
+          sendNextionCommand("start_page.status.pic=1");
+        }
+        
+        // Zeitstempel für den letzten erfolgreichen Update-Status setzen
+        sendNextionCommand("start_page.status.txt=\"" + timeClient.getFormattedTime() + "\"");
+
+      } else {
+        // Fehler beim Parsen des JSON (z.B. falscher Token -> falsches Format)
+        sendNextionCommand("start_page.status.txt=\"JSON Error\"");
+      }
+    } else {
+      // HTTP-Fehlercode, z.B. 401 Unauthorized oder 404 Not Found
+      sendNextionCommand("start_page.status.txt=\"HTTP " + String(httpCode) + "\"");
+    }
+  } else {
+    // Keine Verbindung zum Pi-hole möglich
+    sendNextionCommand("start_page.status.txt=\"Host unreach\"");
   }
-  return 1;
+  
+  http.end();
+}
+
+// Hilfsfunktion: Befehl ans Display senden und mit 3x 0xFF terminieren
+void sendNextionCommand(const String& cmd) {
+  Serial.print(cmd);
+  Serial.write(0xff);
+  Serial.write(0xff);
+  Serial.write(0xff);
 }
